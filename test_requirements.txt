@@ -1,0 +1,27 @@
+# Testing dependencies for Civic Complaint Intelligence Engine
+# Install with: pip install -r test_requirements.txt
+
+# Core testing framework
+pytest==7.4.3
+pytest-asyncio==0.21.1
+pytest-mock==3.12.0
+
+# HTTP testing
+httpx==0.25.1
+
+# Coverage reporting (optional)
+pytest-cov==4.1.0
+
+# For better test output
+pytest-html==3.2.0
+pytest-xdist==3.5.0  # For parallel test execution
+
+# Timeouts for long-running tests
+pytest-timeout==2.2.0
+
+# Mocking and testing utilities
+responses==0.24.1
+freezegun==1.4.0  # For mocking time
+
+# For debugging tests
+ipdb==0.13.13
