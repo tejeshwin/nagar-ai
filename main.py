@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List
 import uuid
 from datetime import datetime
+import asyncio
+from concurrent.futures import TimeoutError
 
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -160,36 +162,68 @@ async def submit_complaint(
                 
                 logger.info(f"Audio file saved: {audio_path}")
                 
-                # Apply edge-processed audio compression
-                processed_audio_path, audio_metadata = await audio_processor.process_audio_file(
-                    str(audio_path)
-                )
-                response_data["audio_metadata"] = audio_metadata
-                warnings.append(f"Audio compressed: {audio_metadata['compression_ratio']}x reduction")
+                # Apply edge-processed audio compression with timeout
+                try:
+                    processed_audio_path, audio_metadata = await asyncio.wait_for(
+                        audio_processor.process_audio_file(str(audio_path)),
+                        timeout=30.0  # 30 second timeout for audio processing
+                    )
+                    response_data["audio_metadata"] = audio_metadata
+                    warnings.append(f"Audio compressed: {audio_metadata['compression_ratio']}x reduction")
+                except TimeoutError:
+                    error_msg = "Audio processing timeout - using original file"
+                    logger.warning(error_msg)
+                    warnings.append(error_msg)
+                    processed_audio_path = str(audio_path)
+                    response_data["audio_metadata"] = {"compression_ratio": 1.0, "error": "timeout"}
+                except Exception as e:
+                    error_msg = f"Audio compression failed: {str(e)} - using original file"
+                    logger.warning(error_msg)
+                    warnings.append(error_msg)
+                    processed_audio_path = str(audio_path)
+                    response_data["audio_metadata"] = {"compression_ratio": 1.0, "error": str(e)}
                 
-                # Transcribe audio with error handling for noisy inputs
-                transcription_result = await audio_transcriber.transcribe_audio(
-                    processed_audio_path,
-                    language=language
-                )
-                
-                if transcription_result.get("error"):
-                    warnings.append(f"Audio transcription issue: {transcription_result['error']}")
-                    transcribed_text = transcription_result.get("text", "")
-                else:
-                    transcribed_text = transcription_result.get("text", "")
-                    response_data["transcription_metadata"] = {
-                        "language": transcription_result.get("language"),
-                        "confidence": transcription_result.get("confidence"),
-                        "method": transcription_result.get("method")
-                    }
-                
-                response_data["transcribed_text"] = transcribed_text
+                # Transcribe audio with error handling for noisy inputs and API timeouts
+                try:
+                    transcription_result = await asyncio.wait_for(
+                        audio_transcriber.transcribe_audio(
+                            processed_audio_path,
+                            language=language
+                        ),
+                        timeout=60.0  # 60 second timeout for transcription
+                    )
+                    
+                    if transcription_result.get("error"):
+                        warnings.append(f"Audio transcription issue: {transcription_result['error']}")
+                        transcribed_text = transcription_result.get("text", "")
+                    else:
+                        transcribed_text = transcription_result.get("text", "")
+                        response_data["transcription_metadata"] = {
+                            "language": transcription_result.get("language"),
+                            "confidence": transcription_result.get("confidence"),
+                            "method": transcription_result.get("method")
+                        }
+                    
+                    response_data["transcribed_text"] = transcribed_text
+                except TimeoutError:
+                    error_msg = "Transcription API timeout - using text input if available"
+                    logger.warning(error_msg)
+                    warnings.append(error_msg)
+                    transcribed_text = text or ""
+                    response_data["transcribed_text"] = transcribed_text
+                except Exception as e:
+                    error_msg = f"Transcription failed: {str(e)} - using text input if available"
+                    logger.warning(error_msg)
+                    warnings.append(error_msg)
+                    transcribed_text = text or ""
+                    response_data["transcribed_text"] = transcribed_text
                 
             except Exception as e:
-                error_msg = f"Audio processing failed: {str(e)}"
+                error_msg = f"Audio file processing failed: {str(e)} - skipping audio"
                 logger.error(error_msg)
                 warnings.append(error_msg)
+                transcribed_text = text or ""
+                response_data["transcribed_text"] = transcribed_text
         
         # Process image file if provided
         if image:
@@ -204,34 +238,77 @@ async def submit_complaint(
                 
                 logger.info(f"Image file saved: {image_path}")
                 
-                # Apply privacy-by-design image scrubbing
-                scrubbed_image_path, image_metadata = await image_scrubber.scrub_image(
-                    str(image_path)
-                )
-                response_data["image_path"] = scrubbed_image_path
-                response_data["image_metadata"] = image_metadata
-                
-                if image_metadata.get("faces_detected", 0) > 0:
-                    warnings.append(f"Privacy scrubbed: {image_metadata['faces_detected']} face(s) blurred")
-                if image_metadata.get("license_plates_detected", 0) > 0:
-                    warnings.append(f"Privacy scrubbed: {image_metadata['license_plates_detected']} license plate(s) blurred")
+                # Apply privacy-by-design image scrubbing with timeout and orientation handling
+                try:
+                    scrubbed_image_path, image_metadata = await asyncio.wait_for(
+                        image_scrubber.scrub_image(str(image_path)),
+                        timeout=30.0  # 30 second timeout for image processing
+                    )
+                    response_data["image_path"] = scrubbed_image_path
+                    response_data["image_metadata"] = image_metadata
+                    
+                    if image_metadata.get("faces_detected", 0) > 0:
+                        warnings.append(f"Privacy scrubbed: {image_metadata['faces_detected']} face(s) blurred")
+                    if image_metadata.get("license_plates_detected", 0) > 0:
+                        warnings.append(f"Privacy scrubbed: {image_metadata['license_plates_detected']} license plate(s) blurred")
+                except TimeoutError:
+                    error_msg = "Image processing timeout - using original file"
+                    logger.warning(error_msg)
+                    warnings.append(error_msg)
+                    response_data["image_path"] = str(image_path)
+                    response_data["image_metadata"] = {"error": "timeout", "faces_detected": 0, "license_plates_detected": 0}
+                except Exception as e:
+                    error_msg = f"Image scrubbing failed: {str(e)} - using original file"
+                    logger.warning(error_msg)
+                    warnings.append(error_msg)
+                    response_data["image_path"] = str(image_path)
+                    response_data["image_metadata"] = {"error": str(e), "faces_detected": 0, "license_plates_detected": 0}
                 
             except Exception as e:
-                error_msg = f"Image processing failed: {str(e)}"
+                error_msg = f"Image file save failed: {str(e)} - skipping image"
                 logger.error(error_msg)
                 warnings.append(error_msg)
+                response_data["image_path"] = None
         
-        # Extract location with interactive fallback
+        # Extract location with interactive fallback and timeout handling
         gps_coordinates = None
         if gps_latitude is not None and gps_longitude is not None:
             gps_coordinates = (gps_latitude, gps_longitude)
         
-        location_result = await location_extractor.extract_location(
-            text=transcribed_text,
-            image_path=response_data.get("image_path"),
-            gps_coordinates=gps_coordinates,
-            enable_fallback=True
-        )
+        try:
+            location_result = await asyncio.wait_for(
+                location_extractor.extract_location(
+                    text=transcribed_text,
+                    image_path=response_data.get("image_path"),
+                    gps_coordinates=gps_coordinates,
+                    enable_fallback=True
+                ),
+                timeout=20.0  # 20 second timeout for location extraction
+            )
+        except TimeoutError:
+            error_msg = "Location extraction timeout - enabling fallback"
+            logger.warning(error_msg)
+            warnings.append(error_msg)
+            location_result = {
+                "coordinates": None,
+                "requires_user_input": True,
+                "fallback_message": "Location extraction took too long. Please provide the location manually.",
+                "source": "timeout_fallback",
+                "confidence": 0.0,
+                "address": None
+            }
+        except Exception as e:
+            error_msg = f"Location extraction failed: {str(e)} - enabling fallback"
+            logger.warning(error_msg)
+            warnings.append(error_msg)
+            location_result = {
+                "coordinates": None,
+                "requires_user_input": True,
+                "fallback_message": "Could not automatically determine location. Please provide the location manually.",
+                "source": "error_fallback",
+                "confidence": 0.0,
+                "address": None
+            }
         
         response_data["location_metadata"] = {
             "source": location_result.get("source"),
@@ -301,10 +378,22 @@ async def update_complaint_location(
     
     stored_complaint = complaint_storage[complaint_id]
     
-    # Process user's location response
-    location_result = await location_extractor.process_user_location_response(
-        location_request.location_input
-    )
+    # Process user's location response with timeout handling
+    try:
+        location_result = await asyncio.wait_for(
+            location_extractor.process_user_location_response(
+                location_request.location_input
+            ),
+            timeout=20.0  # 20 second timeout for location processing
+        )
+    except TimeoutError:
+        error_msg = "Location processing timeout"
+        logger.error(error_msg)
+        raise HTTPException(status_code=503, detail="Location processing service temporarily unavailable")
+    except Exception as e:
+        error_msg = f"Location processing failed: {str(e)}"
+        logger.error(error_msg)
+        raise HTTPException(status_code=500, detail=error_msg)
     
     if location_result.get("coordinates"):
         # Update complaint with location
