@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     sarvam_api_key: str = ""
     sarvam_api_base_url: str = "https://api.sarvam.ai"
     sarvam_model: str = "saarika:v1"
+    llama_api_key: str = ""
+    llama_api_base_url: str = "https://api.llama-api.com"
     
     # Directory Configuration
     upload_dir: str = "./uploads"
